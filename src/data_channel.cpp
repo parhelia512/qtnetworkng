@@ -1,4 +1,5 @@
 #include <QtCore/qmap.h>
+#include <QtCore/qset.h>
 #include <QtCore/qpointer.h>
 #include <QtCore/qsharedpointer.h>
 #include <QtCore/qendian.h>
@@ -114,6 +115,12 @@ enum class BlockFlag
     Block_Until_Sent,
 };
 
+struct PendingChannelEntry
+{
+    QSharedPointer<VirtualChannel> channel;
+    qint64 enqueuedAt = 0;
+};
+
 class DataChannelPrivate
 {
 public:
@@ -147,12 +154,14 @@ public:
     bool handleCommand(const QByteArray &packet);
     void notifyChannelClose(quint32 channelNumber);
     DataChannel::ChannelError handleIncomingPacket(quint32 channelNumber, const QByteArray &payload);
+    void enqueuePendingChannel(const QSharedPointer<VirtualChannel> &channel);
+    void checkPendingChannelTimeouts(qint64 timeoutMs, qint64 now);
 
     QString name;
     DataChannelPole pole;
     quint32 nextChannelNumber;
     QMap<quint32, QWeakPointer<VirtualChannel>> subChannels;
-    QQueue<QSharedPointer<VirtualChannel>> pendingChannels;
+    QQueue<PendingChannelEntry> pendingChannels;
     Condition pendingChannelsNotEmpty;
     SizedQueue<QByteArray> receivingQueue;
     bool slowDownRequested = false;
@@ -213,6 +222,7 @@ public:
     void doSend();
     void doReceive();
     void doKeepalive();
+    void checkAllPendingChannelTimeouts(qint64 timeoutMs, qint64 now);
 
     const QSharedPointer<SocketLike> connection;
     SizedQueue<WritingPacket> sendingQueue;
@@ -223,6 +233,8 @@ public:
     qint64 lastKeepaliveTimestamp;
     qint64 keepaliveTimeout;
     qint64 keepaliveInterval;
+    qint64 pendingChannelMsTimeout;
+    QSet<QPointer<DataChannel>> pendingChannelOwners;
 
     Q_DECLARE_PUBLIC(SocketChannel)
 };
@@ -249,6 +261,42 @@ public:
 
     Q_DECLARE_PUBLIC(VirtualChannel)
 };
+
+static SocketChannelPrivate *asSocketRoot(DataChannelPrivate *d)
+{
+    while (d) {
+        if (SocketChannelPrivate *root = dynamic_cast<SocketChannelPrivate *>(d)) {
+            return root;
+        }
+        VirtualChannelPrivate *vc = dynamic_cast<VirtualChannelPrivate *>(d);
+        if (!vc || vc->parentChannel.isNull()) {
+            return nullptr;
+        }
+        d = DataChannelPrivate::getPrivateHelper(vc->parentChannel);
+    }
+    return nullptr;
+}
+
+inline uint qHash(const QPointer<DataChannel> &channel, uint seed = 0)
+{
+    return qHash(channel.data(), seed);
+}
+
+static void trackPendingChannelOwner(DataChannelPrivate *owner)
+{
+    SocketChannelPrivate *root = asSocketRoot(owner);
+    if (root) {
+        root->pendingChannelOwners.insert(owner->q_ptr);
+    }
+}
+
+static void untrackPendingChannelOwner(DataChannelPrivate *owner)
+{
+    SocketChannelPrivate *root = asSocketRoot(owner);
+    if (root) {
+        root->pendingChannelOwners.remove(owner->q_ptr);
+    }
+}
 
 DataChannelPrivate::DataChannelPrivate(DataChannelPole pole, DataChannel *parent)
     : pole(pole)
@@ -292,6 +340,7 @@ QString DataChannelPrivate::toString() const
 void DataChannelPrivate::abort(DataChannel::ChannelError reason)
 {
     Q_ASSERT(error != DataChannel::NoError);  // must be called by subclasses's close method.
+    untrackPendingChannelOwner(this);
     if (!pluggedChannel.isNull()) {
         getPrivateHelper(pluggedChannel)->abort(reason);
         pluggedChannel.clear();
@@ -301,7 +350,7 @@ void DataChannelPrivate::abort(DataChannel::ChannelError reason)
         receivingQueue.put(QByteArray());
     }
     for (quint32 i = 0; i < pendingChannelsNotEmpty.getting(); ++i) {
-        pendingChannels.enqueue(QSharedPointer<VirtualChannel>());
+        pendingChannels.enqueue(PendingChannelEntry());
     }
     pendingChannelsNotEmpty.notifyAll();
 
@@ -310,6 +359,8 @@ void DataChannelPrivate::abort(DataChannel::ChannelError reason)
         const QWeakPointer<VirtualChannel> &subChannel = itor.next().value();
         if (!subChannel.isNull()) {
             QSharedPointer<VirtualChannel> strong = subChannel.toStrongRef();
+            // Untrack before clearing parentChannel, otherwise asSocketRoot() cannot walk up.
+            untrackPendingChannelOwner(strong->d_func());
             strong->d_func()->parentChannel.clear();
             strong->d_func()->abort(this->error);
         }
@@ -379,6 +430,41 @@ DataChannel::ChannelError DataChannelPrivate::handleIncomingPacket(quint32 chann
     return DataChannel::NoError;
 }
 
+void DataChannelPrivate::enqueuePendingChannel(const QSharedPointer<VirtualChannel> &channel)
+{
+    PendingChannelEntry entry;
+    entry.channel = channel;
+    entry.enqueuedAt = QDateTime::currentMSecsSinceEpoch();
+    pendingChannels.enqueue(entry);
+    pendingChannelsNotEmpty.notify();
+    trackPendingChannelOwner(this);
+}
+
+void DataChannelPrivate::checkPendingChannelTimeouts(qint64 timeoutMs, qint64 now)
+{
+    if (timeoutMs <= 0) {
+        return;
+    }
+    QList<QSharedPointer<VirtualChannel>> timedOutChannels;
+    for (int i = pendingChannels.size() - 1; i >= 0; --i) {
+        const PendingChannelEntry &entry = pendingChannels.at(i);
+        if (entry.channel.isNull()) {
+            continue;
+        }
+        if (now <= entry.enqueuedAt || (now - entry.enqueuedAt) <= timeoutMs) {
+            continue;
+        }
+        timedOutChannels.append(entry.channel);
+        pendingChannels.removeAt(i);
+    }
+    for (const QSharedPointer<VirtualChannel> &channel : timedOutChannels) {
+        channel->d_func()->abort(DataChannel::PendingChannelTimeoutError);
+    }
+    if (pendingChannels.isEmpty()) {
+        untrackPendingChannelOwner(this);
+    }
+}
+
 QSharedPointer<VirtualChannel> DataChannelPrivate::makeChannelInternal(DataChannelPole pole, quint32 channelNumber)
 {
     Q_Q(DataChannel);
@@ -405,12 +491,16 @@ QSharedPointer<VirtualChannel> DataChannelPrivate::makeChannel()
 
 QSharedPointer<VirtualChannel> DataChannelPrivate::takeChannel()
 {
-    if (isBroken()) {
-        return QSharedPointer<VirtualChannel>();
-    }
     while (true) {
+        if (isBroken()) {
+            return QSharedPointer<VirtualChannel>();
+        }
         if (!pendingChannels.isEmpty()) {
-            return pendingChannels.takeFirst();
+            QSharedPointer<VirtualChannel> channel = pendingChannels.takeFirst().channel;
+            if (pendingChannels.isEmpty()) {
+                untrackPendingChannelOwner(this);
+            }
+            return channel;
         }
         if (!pendingChannelsNotEmpty.wait()) {
             return QSharedPointer<VirtualChannel>();
@@ -424,9 +514,12 @@ QSharedPointer<VirtualChannel> DataChannelPrivate::takeChannel(quint32 channelNu
         return QSharedPointer<VirtualChannel>();
     }
     for (int i = 0; i < pendingChannels.size(); i++) {
-        QSharedPointer<VirtualChannel> channel = pendingChannels.at(i);
+        QSharedPointer<VirtualChannel> channel = pendingChannels.at(i).channel;
         if (channel && channel->channelNumber() == channelNumber) {
             pendingChannels.removeAt(i);
+            if (pendingChannels.isEmpty()) {
+                untrackPendingChannelOwner(this);
+            }
             return channel;
         }
     }
@@ -439,7 +532,7 @@ QSharedPointer<VirtualChannel> DataChannelPrivate::peekChannel(quint32 channelNu
         return QSharedPointer<VirtualChannel>();
     }
     for (int i = 0; i < pendingChannels.size(); i++) {
-        QSharedPointer<VirtualChannel> channel = pendingChannels.at(i);
+        QSharedPointer<VirtualChannel> channel = pendingChannels.at(i).channel;
         if (channel && channel->channelNumber() == channelNumber) {
             return channel;
         }
@@ -497,8 +590,7 @@ bool DataChannelPrivate::handleCommand(const QByteArray &packet)
         }
         QSharedPointer<VirtualChannel> channel = makeChannelInternal(DataChannelPole::NegativePole, channelNumber);
         sendPacketRaw(CommandChannelNumber, packChannelMadeRequest(channelNumber), BlockFlag::NonBlock);
-        pendingChannels.enqueue(channel);
-        pendingChannelsNotEmpty.notify();
+        enqueuePendingChannel(channel);
         return true;
     } else if (command == CHANNEL_MADE_REQUEST) {
 #ifdef DEBUG_PROTOCOL
@@ -574,6 +666,7 @@ SocketChannelPrivate::SocketChannelPrivate(QSharedPointer<SocketLike> connection
     , lastKeepaliveTimestamp(lastActiveTimestamp)
     , keepaliveTimeout(-1)
     , keepaliveInterval(1000 * 2)
+    , pendingChannelMsTimeout(1000 * 8)
 {
     // connection->setOption(Socket::LowDelayOption, true);
     // connection->setOption(Socket::KeepAliveOption, false);  // we do it!
@@ -761,6 +854,7 @@ void SocketChannelPrivate::doKeepalive()
 #endif
             return abort(DataChannel::KeepaliveTimeoutError);
         }
+        checkAllPendingChannelTimeouts(pendingChannelMsTimeout, now);
         // now and lastKeepaliveTimestamp both are unsigned int, we should check which is larger before apply minus
         // operator to them.
         if (now > lastKeepaliveTimestamp && (now - lastKeepaliveTimestamp > keepaliveInterval)
@@ -775,6 +869,29 @@ void SocketChannelPrivate::doKeepalive()
     }
 }
 
+void SocketChannelPrivate::checkAllPendingChannelTimeouts(qint64 timeoutMs, qint64 now)
+{
+    if (timeoutMs <= 0) {
+        return;
+    }
+    const QSet<QPointer<DataChannel>> owners = pendingChannelOwners;
+    for (const QPointer<DataChannel> &ownerChannel : owners) {
+        if (ownerChannel.isNull()) {
+            pendingChannelOwners.remove(ownerChannel);
+            continue;
+        }
+        DataChannelPrivate *owner = DataChannelPrivate::getPrivateHelper(ownerChannel);
+        if (owner->error != DataChannel::NoError) {
+            pendingChannelOwners.remove(ownerChannel);
+            continue;
+        }
+        owner->checkPendingChannelTimeouts(timeoutMs, now);
+        if (owner->pendingChannels.isEmpty()) {
+            pendingChannelOwners.remove(ownerChannel);
+        }
+    }
+}
+
 void SocketChannelPrivate::abort(DataChannel::ChannelError reason)
 {
     if (error != DataChannel::NoError) {
@@ -784,6 +901,7 @@ void SocketChannelPrivate::abort(DataChannel::ChannelError reason)
 #ifdef DEBUG_PROTOCOL
     qtng_debug << "socket data channel abort:" << error;
 #endif
+    pendingChannelOwners.clear();
     Coroutine *current = Coroutine::current();
     connection->abort();
 
@@ -1074,6 +1192,25 @@ float SocketChannel::keepaliveInterval() const
     return static_cast<float>(d->keepaliveInterval) / 1000;
 }
 
+void SocketChannel::setPendingChannelTimeout(float timeout)
+{
+    Q_D(SocketChannel);
+    if (timeout > 0) {
+        d->pendingChannelMsTimeout = static_cast<qint64>(timeout * 1000);
+        if (d->pendingChannelMsTimeout < 1000) {
+            d->pendingChannelMsTimeout = 1000;
+        }
+    } else {
+        d->pendingChannelMsTimeout = -1;
+    }
+}
+
+float SocketChannel::pendingChannelTimeout() const
+{
+    Q_D(const SocketChannel);
+    return static_cast<float>(d->pendingChannelMsTimeout) / 1000;
+}
+
 quint32 SocketChannel::sendingQueueSize() const
 {
     Q_D(const SocketChannel);
@@ -1183,6 +1320,8 @@ QString DataChannel::errorString() const
         return QString::fromLatin1("The plugged channel has error.");
     case PakcetTooLarge:
         return QString::fromLatin1("The packet is too large.");
+    case PendingChannelTimeoutError:
+        return QString::fromLatin1("The pending channel was not taken by application in time.");
     case UnknownError:
         return QString::fromLatin1("Caught unknown error.");
     case ProgrammingError:
