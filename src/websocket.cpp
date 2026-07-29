@@ -81,7 +81,7 @@ public:
 public:
     inline bool isValid() const
     {
-        return !payload.isEmpty() && (type == WebSocketConnection::Binary || type == WebSocketConnection::Text);
+        return type == WebSocketConnection::Binary || type == WebSocketConnection::Text;
     }
 };
 
@@ -117,7 +117,7 @@ public:
     // make frame packet.
     QByteArray toByteArray() const;
 public:
-    inline bool isValid() const { return !rsv1 && !rsv2 && !rsv3 && !payload.isEmpty(); }
+    inline bool isValid() const { return !rsv1 && !rsv2 && !rsv3; }
 };
 
 class WebSocketConnectionPrivate
