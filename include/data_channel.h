@@ -34,7 +34,6 @@ public:
         UserShutdown = 7,
         PluggedChannelError = 8,
         PakcetTooLarge = 9,
-        PendingChannelTimeoutError = 10,
 
         UnknownError = 100,
         ProgrammingError = 101,
@@ -89,8 +88,6 @@ public:
     float keepaliveTimeout() const;
     void setKeepaliveInterval(float keepaliveInterval);
     float keepaliveInterval() const;
-    void setPendingChannelTimeout(float timeout);
-    float pendingChannelTimeout() const;
     quint32 sendingQueueSize() const;
     QSharedPointer<SocketLike> connection() const;
 private:
