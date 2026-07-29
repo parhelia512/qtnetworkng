@@ -154,7 +154,8 @@ void SemaphorePrivate::scheduleDelete(QSharedPointer<SemaphorePrivate> self)
         notified = 0;
     }
     counter = init_value;
-    EventLoopCoroutine::get()->callLater(0, new SemaphoreNotifyWaitersFunctor(self, true));
+    // acquire() asserts notified != 0 when woken via SemaphoreNotifyWaitersFunctor.
+    notified = EventLoopCoroutine::get()->callLater(0, new SemaphoreNotifyWaitersFunctor(self, true));
 }
 
 Semaphore::Semaphore(int value)
