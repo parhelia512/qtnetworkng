@@ -276,6 +276,7 @@ public:
     ~SizedQueueType();
     void setCapacity(quint32 capacity);
     bool put(const T &e);  // insert e to the tail of queue. blocked until not full.
+    bool put(const T &e, quint32 msecs);  // like put(), but wait at most msecs for capacity.
     bool putForcedly(const T &e);  // insert e to the tail of queue ignoring capacity.
     bool returns(const T &e);  // like put() but insert e to the head of queue.
     bool returnsForcely(const T &e);  // like putForcedly() but insert e to the head of queue.
@@ -497,7 +498,13 @@ bool SizedQueueType<T, EventType, ReadWriteLockType, SizeGetter>::remove(const T
 template<typename T, typename EventType, typename ReadWriteLockType, typename SizeGetter>
 bool SizedQueueType<T, EventType, ReadWriteLockType, SizeGetter>::put(const T &e)
 {
-    if (!notFull.tryWait()) {
+    return put(e, UINT_MAX);
+}
+
+template<typename T, typename EventType, typename ReadWriteLockType, typename SizeGetter>
+bool SizedQueueType<T, EventType, ReadWriteLockType, SizeGetter>::put(const T &e, quint32 msecs)
+{
+    if (!notFull.tryWait(msecs)) {
         return false;
     }
     lock.lockForWrite();

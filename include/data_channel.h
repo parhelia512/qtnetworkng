@@ -34,6 +34,7 @@ public:
         UserShutdown = 7,
         PluggedChannelError = 8,
         PakcetTooLarge = 9,
+        PendingChannelLimitError = 10,
 
         UnknownError = 100,
         ProgrammingError = 101,
@@ -53,6 +54,13 @@ public:
     quint32
     capacity() const;  // so, a data channel may consume `maxPacketSize * capacity` bytes of receiving buffer memory.
     quint32 receivingQueueSize() const;
+    // Max untaken pending channels. When exceeded, the oldest pending channel is aborted.
+    // Set to 0 for unlimited. Default is 8.
+    void setMaxPendingChannels(quint32 count);
+    quint32 maxPendingChannels() const;
+    // Timeout for goThrough wait and blocking sendPacket waits. Set <= 0 to wait forever. Default is 30s.
+    void setSendingTimeout(float timeout);
+    float sendingTimeout() const;
     DataChannelPole pole() const;
     void setName(const QString &name);
     QString name() const;
