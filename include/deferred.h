@@ -109,7 +109,9 @@ void Deferred<ARG>::run(const ARG &arg, bool ok)
     originalResult = qMakePair(arg, ok);
     ran = true;
     bool _ok = ok;
-    for (const std::tuple<int, Callback, Callback> &item : stack) {
+    // Copy before iterating: callbacks may remove/clear/add on the same Deferred.
+    const QList<std::tuple<int, Callback, Callback>> stackCopy = stack;
+    for (const std::tuple<int, Callback, Callback> &item : stackCopy) {
         try {
             if (_ok) {
                 std::get<1>(item)(arg);
@@ -155,12 +157,24 @@ int Deferred<void>::addErrback(Callback errback)
     return addCallbacks(callback, errback);
 }
 
+void Deferred<void>::remove(int id)
+{
+    for (int i = 0; i < stack.size(); ++i) {
+        if (std::get<0>(stack[i]) == id) {
+            stack.removeAt(i);
+            return;
+        }
+    }
+}
+
 void Deferred<void>::run(bool ok)
 {
     originalResult = ok;
     ran = true;
     bool _ok = ok;
-    for (const std::tuple<int, Callback, Callback> &item : stack) {
+    // Copy before iterating: callbacks may remove/clear/add on the same Deferred.
+    const QList<std::tuple<int, Callback, Callback>> stackCopy = stack;
+    for (const std::tuple<int, Callback, Callback> &item : stackCopy) {
         try {
             if (_ok) {
                 std::get<1>(item)();
