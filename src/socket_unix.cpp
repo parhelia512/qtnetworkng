@@ -163,6 +163,10 @@ bool SocketPrivate::createSocket()
 
         return false;
     }
+#ifndef SOCK_CLOEXEC
+    // macOS has no SOCK_CLOEXEC
+    ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
 #ifdef Q_OS_MAC
     if (!setNonblocking()) {
         close();

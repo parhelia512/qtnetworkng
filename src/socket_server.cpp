@@ -1,10 +1,10 @@
-#include <QtCore/qloggingcategory.h>
 #include "../include/socket_server.h"
+#include "debugger.h"
 
 // #define DEBUG_PROTOCOL 1
 
 #ifdef DEBUG_PROTOCOL
-static Q_LOGGING_CATEGORY(logger, "qtng.socket_server");
+QTNG_LOGGER("qtng.socket_server");
 #endif
 
 QTNETWORKNG_NAMESPACE_BEGIN
@@ -98,7 +98,7 @@ bool BaseStreamServer::serverBind()
     d->bound = d->serverSocket->bind(d->serverAddress, d->serverPort, mode);
 #ifdef DEBUG_PROTOCOL
     if (!d->bound) {
-        qCInfo(logger) << "server can not bind to" << d->serverAddress.toString() << ":" << d->serverPort;
+        qtng_info << "server can not bind to" << d->serverAddress.toString() << ":" << d->serverPort;
     }
 #endif
     return d->bound;
@@ -119,7 +119,7 @@ bool BaseStreamServer::serverActivate()
     bool ok = d->serverSocket->listen(d->requestQueueSize);
 #ifdef DEBUG_PROTOCOL
     if (!ok) {
-        qCInfo(logger) << "server can not listen to" << d->serverAddress.toString() << ":" << d->serverPort;
+        qtng_info << "server can not listen to" << d->serverAddress.toString() << ":" << d->serverPort;
     }
 #endif
     return ok;
@@ -131,11 +131,30 @@ void BaseStreamServer::serverClose()
     d->serverSocket->close();
 }
 
+class ServingStateGuard
+{
+public:
+    ServingStateGuard(QSharedPointer<Event> started, QSharedPointer<Event> stopped)
+        : started(started)
+        , stopped(stopped)
+    {
+        started->set();
+        stopped->clear();
+    }
+    ~ServingStateGuard()
+    {
+        started->clear();
+        stopped->set();
+    }
+private:
+    QSharedPointer<Event> started;
+    QSharedPointer<Event> stopped;
+};
+
 void BaseStreamServerPrivate::serveForever()
 {
     Q_Q(BaseStreamServer);
-    started->set();
-    stopped->clear();
+    ServingStateGuard servingStateGuard(started, stopped);
     while (true) {
         QSharedPointer<SocketLike> request = q->getRequest();
         if (request.isNull()) {
@@ -163,9 +182,10 @@ void BaseStreamServerPrivate::serveForever()
             break;
         }
     }
+#ifdef DEBUG_PROTOCOL
+    qtng_info << "server stopped" << serverAddress << serverPort;
+#endif
     q->serverClose();
-    started->clear();
-    stopped->set();
 }
 
 bool BaseStreamServer::serveForever()
