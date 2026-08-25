@@ -2,6 +2,8 @@
 #include <QtCore/qfile.h>
 extern "C" {
 #include <openssl/pem.h>
+#include <openssl/rsa.h>
+#include <openssl/dsa.h>
 }
 #include "../include/pkey.h"
 #include "../include/private/crypto_p.h"
@@ -24,12 +26,12 @@ public:
     bool verify(const QByteArray &data, const QByteArray &hash, MessageDigest::Algorithm hashAlgo) const;
     QByteArray encrypt(const QByteArray &data) const;
     QByteArray decrypt(const QByteArray &data) const;
-    bool checkValidRsaKey(const QByteArray &data, PublicKey::RsaPadding padding, bool requirePrivate, RSA *&rsa,
-                          int &rsaSize) const;
+    bool checkValidRsaKey(const QByteArray &data, PublicKey::RsaPadding padding, bool requirePrivate) const;
     QByteArray rsaPublicEncrypt(const QByteArray &data, PublicKey::RsaPadding padding) const;
     QByteArray rsaPublicDecrypt(const QByteArray &data, PublicKey::RsaPadding padding) const;
     QByteArray rsaPrivateEncrypt(const QByteArray &data, PublicKey::RsaPadding padding) const;
     QByteArray rsaPrivateDecrypt(const QByteArray &data, PublicKey::RsaPadding padding) const;
+    EVP_PKEY_CTX *newRsaCtx(PublicKey::RsaPadding padding, int (*init)(EVP_PKEY_CTX *)) const;
     static PrivateKey generate(PublicKey::Algorithm algo, int bits);
     static bool inline setPkey(PublicKey *key, EVP_PKEY *pkey, bool hasPrivate);
 public:
@@ -120,49 +122,59 @@ PrivateKey PublicKeyPrivate::generate(PublicKey::Algorithm algo, int bits)
 
     EVP_PKEY *pkey = nullptr;
 
-    pkey = EVP_PKEY_new();
-    if (!pkey) {
-        return key;
-    }
-
     if (algo == PrivateKey::Rsa) {
-        RSA *rsa = RSA_new();
-        if (!rsa) {
-            EVP_PKEY_free(pkey);
+        EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+        if (!ctx) {
             return key;
         }
-        BIGNUM *e = BN_new();
-        if (!e) {
-            RSA_free(rsa);
-            EVP_PKEY_free(pkey);
+        rvalue = EVP_PKEY_keygen_init(ctx);
+        if (rvalue <= 0) {
+            EVP_PKEY_CTX_free(ctx);
             return key;
         }
-        BN_set_word(e, 65537);
-        rvalue = RSA_generate_key_ex(rsa, bits, e, nullptr);
-        BN_free(e);
-        if (rvalue) {
-            rvalue = EVP_PKEY_set1_RSA(pkey, rsa);
+        if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, bits) <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            return key;
         }
-        RSA_free(rsa);
-        if (!rvalue) {
+        rvalue = EVP_PKEY_keygen(ctx, &pkey);
+        EVP_PKEY_CTX_free(ctx);
+        if (rvalue <= 0 || !pkey) {
             EVP_PKEY_free(pkey);
             return key;
         }
     } else if (algo == PrivateKey::Dsa) {
-        DSA *dsa = DSA_new();
-        if (!dsa) {
-            EVP_PKEY_free(pkey);
+        EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_DSA, nullptr);
+        if (!ctx) {
             return key;
         }
-        rvalue = DSA_generate_parameters_ex(dsa, bits, nullptr, 0, nullptr, nullptr, nullptr);
-        if (rvalue) {
-            rvalue = DSA_generate_key(dsa);
-            if (rvalue) {
-                rvalue = EVP_PKEY_set1_DSA(pkey, dsa);
-            }
+        rvalue = EVP_PKEY_paramgen_init(ctx);
+        if (rvalue <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            return key;
         }
-        DSA_free(dsa);
-        if (!rvalue) {
+        if (EVP_PKEY_CTX_set_dsa_paramgen_bits(ctx, bits) <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            return key;
+        }
+        EVP_PKEY *params = nullptr;
+        rvalue = EVP_PKEY_paramgen(ctx, &params);
+        EVP_PKEY_CTX_free(ctx);
+        if (rvalue <= 0 || !params) {
+            return key;
+        }
+        ctx = EVP_PKEY_CTX_new(params, nullptr);
+        EVP_PKEY_free(params);
+        if (!ctx) {
+            return key;
+        }
+        rvalue = EVP_PKEY_keygen_init(ctx);
+        if (rvalue <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            return key;
+        }
+        rvalue = EVP_PKEY_keygen(ctx, &pkey);
+        EVP_PKEY_CTX_free(ctx);
+        if (rvalue <= 0 || !pkey) {
             EVP_PKEY_free(pkey);
             return key;
         }
@@ -311,8 +323,8 @@ QByteArray PublicKeyPrivate::decrypt(const QByteArray &data) const
     return QByteArray();
 }
 
-bool PublicKeyPrivate::checkValidRsaKey(const QByteArray &data, PublicKey::RsaPadding padding, bool requirePrivate,
-                                        RSA *&rsa, int &rsaSize) const
+bool PublicKeyPrivate::checkValidRsaKey(const QByteArray &data, PublicKey::RsaPadding padding,
+                                        bool requirePrivate) const
 {
     if (pkey.isNull() || data.isEmpty()) {
         qtng_debug << "pkey or data is null";
@@ -328,19 +340,12 @@ bool PublicKeyPrivate::checkValidRsaKey(const QByteArray &data, PublicKey::RsaPa
         return false;
     }
 
-#if OPENSSL_VERSION_MAJOR >= 3
-    const RSA *t = EVP_PKEY_get0_RSA(pkey.data());
-    rsa = const_cast<RSA *>(t);
-#else
-    rsa = EVP_PKEY_get0_RSA(pkey.data());
-#endif
-    if (!rsa) {
+    if (EVP_PKEY_base_id(pkey.data()) != EVP_PKEY_RSA) {
         qtng_debug << "not rsa key.";
         return false;
     }
 
-    rsaSize = RSA_size(rsa);
-    if (!rsaSize) {
+    if (EVP_PKEY_size(pkey.data()) <= 0) {
         qtng_debug << "can not get rsa size.";
         return false;
     }
@@ -348,92 +353,147 @@ bool PublicKeyPrivate::checkValidRsaKey(const QByteArray &data, PublicKey::RsaPa
     return true;
 }
 
+EVP_PKEY_CTX *PublicKeyPrivate::newRsaCtx(PublicKey::RsaPadding padding, int (*init)(EVP_PKEY_CTX *)) const
+{
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pkey.data(), nullptr);
+    if (!ctx) {
+        return nullptr;
+    }
+    if (init(ctx) <= 0 || EVP_PKEY_CTX_set_rsa_padding(ctx, static_cast<int>(padding)) <= 0) {
+        EVP_PKEY_CTX_free(ctx);
+        return nullptr;
+    }
+    return ctx;
+}
+
 QByteArray PublicKeyPrivate::rsaPublicEncrypt(const QByteArray &data, PublicKey::RsaPadding padding) const
 {
-    RSA *rsa;
-    int rsaSize;
-    if (!checkValidRsaKey(data, padding, false, rsa, rsaSize)) {
+    if (!checkValidRsaKey(data, padding, false)) {
         return QByteArray();
     }
 
-    int rvalue;
-    QByteArray result;
-    result.resize(qMax(rsaSize, data.size()));
-    rvalue = RSA_public_encrypt(data.size(), reinterpret_cast<const unsigned char *>(data.data()),
-                                reinterpret_cast<unsigned char *>(result.data()), rsa, static_cast<int>(padding));
-    if (rvalue > 0) {
-        result.resize(rvalue);
-        return result;
-    } else {
+    EVP_PKEY_CTX *ctx = newRsaCtx(padding, EVP_PKEY_encrypt_init);
+    if (!ctx) {
+        return QByteArray();
+    }
+    size_t outlen = 0;
+    int rvalue = EVP_PKEY_encrypt(ctx, nullptr, &outlen, reinterpret_cast<const unsigned char *>(data.data()),
+                                  static_cast<unsigned int>(data.size()));
+    if (rvalue <= 0 || outlen == 0) {
+        EVP_PKEY_CTX_free(ctx);
         qtng_debug << "can not public encrypt data.";
         return QByteArray();
     }
+    QByteArray result;
+    result.resize(static_cast<int>(outlen));
+    rvalue = EVP_PKEY_encrypt(ctx, reinterpret_cast<unsigned char *>(result.data()), &outlen,
+                              reinterpret_cast<const unsigned char *>(data.data()),
+                              static_cast<unsigned int>(data.size()));
+    EVP_PKEY_CTX_free(ctx);
+    if (rvalue <= 0) {
+        qtng_debug << "can not public encrypt data.";
+        return QByteArray();
+    }
+    result.resize(static_cast<int>(outlen));
+    return result;
 }
 
 QByteArray PublicKeyPrivate::rsaPublicDecrypt(const QByteArray &data, PublicKey::RsaPadding padding) const
 {
-    RSA *rsa;
-    int rsaSize;
-    if (!checkValidRsaKey(data, padding, false, rsa, rsaSize)) {
+    if (!checkValidRsaKey(data, padding, false)) {
         return QByteArray();
     }
 
-    int rvalue;
-    QByteArray result;
-    result.resize(qMax(rsaSize, data.size()));
-    rvalue = RSA_public_decrypt(data.size(), reinterpret_cast<const unsigned char *>(data.constData()),
-                                reinterpret_cast<unsigned char *>(result.data()), rsa, static_cast<int>(padding));
-    if (rvalue > 0) {
-        result.resize(rvalue);
-        return result;
-    } else {
+    // raw RSA verify, the EVP counterpart of the deprecated RSA_public_decrypt()
+    EVP_PKEY_CTX *ctx = newRsaCtx(padding, EVP_PKEY_verify_recover_init);
+    if (!ctx) {
+        return QByteArray();
+    }
+    size_t outlen = 0;
+    int rvalue = EVP_PKEY_verify_recover(ctx, nullptr, &outlen, reinterpret_cast<const unsigned char *>(data.data()),
+                                         static_cast<unsigned int>(data.size()));
+    if (rvalue <= 0 || outlen == 0) {
+        EVP_PKEY_CTX_free(ctx);
         qtng_debug << "can not public decrypt data.";
         return QByteArray();
     }
+    QByteArray result;
+    result.resize(static_cast<int>(outlen));
+    rvalue = EVP_PKEY_verify_recover(ctx, reinterpret_cast<unsigned char *>(result.data()), &outlen,
+                                     reinterpret_cast<const unsigned char *>(data.data()),
+                                     static_cast<unsigned int>(data.size()));
+    EVP_PKEY_CTX_free(ctx);
+    if (rvalue <= 0) {
+        qtng_debug << "can not public decrypt data.";
+        return QByteArray();
+    }
+    result.resize(static_cast<int>(outlen));
+    return result;
 }
 
 QByteArray PublicKeyPrivate::rsaPrivateEncrypt(const QByteArray &data, PrivateKey::RsaPadding padding) const
 {
-    RSA *rsa;
-    int rsaSize;
-    if (!checkValidRsaKey(data, padding, true, rsa, rsaSize)) {
+    if (!checkValidRsaKey(data, padding, true)) {
         return QByteArray();
     }
 
-    int rvalue;
-    QByteArray result;
-    result.resize(qMax(rsaSize, data.size()));
-    rvalue = RSA_private_encrypt(data.size(), reinterpret_cast<const unsigned char *>(data.data()),
-                                 reinterpret_cast<unsigned char *>(result.data()), rsa, static_cast<int>(padding));
-    if (rvalue > 0) {
-        result.resize(rvalue);
-        return result;
-    } else {
+    // raw RSA sign, the EVP counterpart of the deprecated RSA_private_encrypt()
+    EVP_PKEY_CTX *ctx = newRsaCtx(padding, EVP_PKEY_sign_init);
+    if (!ctx) {
+        return QByteArray();
+    }
+    size_t outlen = 0;
+    int rvalue = EVP_PKEY_sign(ctx, nullptr, &outlen, reinterpret_cast<const unsigned char *>(data.data()),
+                               static_cast<unsigned int>(data.size()));
+    if (rvalue <= 0 || outlen == 0) {
+        EVP_PKEY_CTX_free(ctx);
         qtng_debug << "can not private encrypt data.";
         return QByteArray();
     }
+    QByteArray result;
+    result.resize(static_cast<int>(outlen));
+    rvalue =
+            EVP_PKEY_sign(ctx, reinterpret_cast<unsigned char *>(result.data()), &outlen,
+                          reinterpret_cast<const unsigned char *>(data.data()), static_cast<unsigned int>(data.size()));
+    EVP_PKEY_CTX_free(ctx);
+    if (rvalue <= 0) {
+        qtng_debug << "can not private encrypt data.";
+        return QByteArray();
+    }
+    result.resize(static_cast<int>(outlen));
+    return result;
 }
 
 QByteArray PublicKeyPrivate::rsaPrivateDecrypt(const QByteArray &data, PrivateKey::RsaPadding padding) const
 {
-    RSA *rsa;
-    int rsaSize;
-    if (!checkValidRsaKey(data, padding, true, rsa, rsaSize)) {
+    if (!checkValidRsaKey(data, padding, true)) {
         return QByteArray();
     }
 
-    int rvalue;
-    QByteArray result;
-    result.resize(qMax(rsaSize, data.size()));
-    rvalue = RSA_private_decrypt(data.size(), reinterpret_cast<const unsigned char *>(data.data()),
-                                 reinterpret_cast<unsigned char *>(result.data()), rsa, static_cast<int>(padding));
-    if (rvalue > 0) {
-        result.resize(rvalue);
-        return result;
-    } else {
+    EVP_PKEY_CTX *ctx = newRsaCtx(padding, EVP_PKEY_decrypt_init);
+    if (!ctx) {
+        return QByteArray();
+    }
+    size_t outlen = 0;
+    int rvalue = EVP_PKEY_decrypt(ctx, nullptr, &outlen, reinterpret_cast<const unsigned char *>(data.data()),
+                                  static_cast<unsigned int>(data.size()));
+    if (rvalue <= 0 || outlen == 0) {
+        EVP_PKEY_CTX_free(ctx);
         qtng_debug << "can not private decrypt data.";
         return QByteArray();
     }
+    QByteArray result;
+    result.resize(static_cast<int>(outlen));
+    rvalue = EVP_PKEY_decrypt(ctx, reinterpret_cast<unsigned char *>(result.data()), &outlen,
+                              reinterpret_cast<const unsigned char *>(data.data()),
+                              static_cast<unsigned int>(data.size()));
+    EVP_PKEY_CTX_free(ctx);
+    if (rvalue <= 0) {
+        qtng_debug << "can not private decrypt data.";
+        return QByteArray();
+    }
+    result.resize(static_cast<int>(outlen));
+    return result;
 }
 
 struct SimplePasswordCallback : public PasswordCallback
@@ -695,7 +755,11 @@ bool comparePublicKey(const PublicKeyPrivate *d1, const PublicKeyPrivate *d2)
     if (d1->pkey.isNull() || d2->pkey.isNull()) {
         return false;
     }
-    return EVP_PKEY_cmp(d1->pkey.data(), d2->pkey.data());
+#if defined(OPENSSL_VERSION_MAJOR) && OPENSSL_VERSION_MAJOR >= 3
+    return EVP_PKEY_eq(d1->pkey.data(), d2->pkey.data()) == 1;
+#else
+    return EVP_PKEY_cmp(d1->pkey.data(), d2->pkey.data()) == 1;
+#endif
 }
 
 bool PublicKey::operator==(const PublicKey &other) const
