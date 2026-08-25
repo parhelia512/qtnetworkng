@@ -725,10 +725,16 @@ public:
         }
         // to emit aboutToClose()
         QIODevice::close();
+        qint64 bytesWritten = 0;
+        while (!pp->queue.isEmpty()) {
+            bytesWritten += pp->queue.get().size();
+        }
         pp->queue.clear();
         pp->closed = true;
         localBuffer.clear();
-        // no need to emit bytesWritten() as the bytes is discarded.
+        if (pp->shouldEmitBytesWritten && bytesWritten > 0) {
+            QMetaObject::invokeMethod(pp->q_ptr, SIGNAL(bytesWritten(qint64)), Q_ARG(qint64, bytesWritten));
+        }
     }
 
     virtual qint64 readData(char *data, qint64 size) override
