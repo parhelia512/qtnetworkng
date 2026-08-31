@@ -357,7 +357,11 @@ bool EvEventLoopCoroutinePrivate::runUntil(BaseCoroutine *coroutine)
             }
         };
         int callbackId = coroutine->finished.addCallback(here);
-        loopCoroutine->yield();
+        if (!loopCoroutine->yield()) {
+            qtng_warning << "runUntil: yield to loop coroutine failed.";
+            coroutine->finished.remove(callbackId);
+            return false;
+        }
         coroutine->finished.remove(callbackId);
     } else {
         QPointer<BaseCoroutine> old = loopCoroutine;

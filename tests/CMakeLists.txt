@@ -41,3 +41,7 @@ add_test(qtng_tests test_lmdb)
 add_executable(test_pipe test_pipe.cpp)
 target_link_libraries(test_pipe PRIVATE Qt5::Core Qt5::Test qtnetworkng)
 add_test(qtng_tests test_pipe)
+
+add_executable(test_coroutine_group_spawn_with_name test_coroutine_group_spawn_with_name.cpp)
+target_link_libraries(test_coroutine_group_spawn_with_name PRIVATE Qt5::Core Qt5::Test qtnetworkng)
+add_test(test_coroutine_group_spawn_with_name test_coroutine_group_spawn_with_name)
