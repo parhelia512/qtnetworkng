@@ -805,7 +805,8 @@ QSharedPointer<SocketLike> ConnectionPool::oldConnectionForUrl(const QUrl &url)
 
         char tbuf;
         // should i use `peek()`?
-        if (connection->peekRaw(&tbuf, 1) >= 0) {
+        if (connection->peekRaw(&tbuf, 1) == 0) {
+            // we want a "clean" connection. result > 0 means not clean. may it's close notify by ssl connection.
             // qtng_debug << "reuse connect" << connection->localPort();
             return connection;
             //} else {

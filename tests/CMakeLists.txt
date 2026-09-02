@@ -45,3 +45,7 @@ add_test(qtng_tests test_pipe)
 add_executable(test_coroutine_group_spawn_with_name test_coroutine_group_spawn_with_name.cpp)
 target_link_libraries(test_coroutine_group_spawn_with_name PRIVATE Qt5::Core Qt5::Test qtnetworkng)
 add_test(test_coroutine_group_spawn_with_name test_coroutine_group_spawn_with_name)
+
+add_executable(test_https_keepalive test_https_keepalive.cpp)
+target_link_libraries(test_https_keepalive PRIVATE Qt5::Core Qt5::Test qtnetworkng)
+add_test(test_https_keepalive test_https_keepalive)
