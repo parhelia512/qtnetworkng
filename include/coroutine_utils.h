@@ -356,16 +356,20 @@ QSharedPointer<Coroutine> CoroutineGroup::spawnWithName(const QString &name, con
                                                         bool replace)
 {
     QSharedPointer<Coroutine> old = get(name);
+    QSharedPointer<Coroutine> coroutine;
     if (!old.isNull()) {
-        if (replace) {
-            old->kill();
-            coroutines.remove(old);
-            old->join();
-        } else {
+        if (!replace) {
             return old;
         }
+        old->kill();
+        coroutines.remove(old);
+        coroutine = QSharedPointer<Coroutine>(Coroutine::spawn([old, func] {
+            old->join();
+            func();
+        }));
+    } else {
+        coroutine = QSharedPointer<Coroutine>(Coroutine::spawn(func));
     }
-    QSharedPointer<Coroutine> coroutine(Coroutine::spawn(func));
     add(coroutine, name);
     return coroutine;
 }
