@@ -322,6 +322,7 @@ int EvEventLoopCoroutinePrivate::callRepeat(quint32 msecs, Functor *callback)
     watcher->callback = callback;
     watcher->parent = this;
     watcher->watcherId = 0;
+    watcher->w.data = watcher;
     ev_timer_start(loop, &watcher->w);
     watchers.insert(std::make_pair(nextWatcherId, watcher));
     return nextWatcherId++;
