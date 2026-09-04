@@ -77,14 +77,27 @@ static QByteArray packKeepaliveRequest()
 
 static bool unpackCommand(QByteArray data, quint8 *command, quint32 *channelNumber)
 {
-    if (data.size() == (sizeof(quint8) + sizeof(quint32))) {
+    // 只在这里校验帧布局；命令是否*已知*由 handleCommand() 决定，这样未来对端
+    // 扩展协议时不会拖垮旧的一端：
+    //   - command < 32：关键命令必须被理解，未知的视为版本不匹配而中止连接。
+    //   - command >= 32：可选扩展，未知的静默忽略。
+    // 已知命令仍必须以自己的固定布局到达（命令 1..3 带 32 位通道号，4..6 不带）；
+    // 布局不匹配意味着帧畸形而非仅仅未知。
+    const bool hasChannelNumber = data.size() == (sizeof(quint8) + sizeof(quint32));
+    if (!hasChannelNumber && data.size() != sizeof(quint8)) {
+        return false;
+    }
 #if QT_VERSION >= QT_VERSION_CHECK(5, 7, 0)
-        *command = qFromBigEndian<quint8>(data.constData());
+    *command = qFromBigEndian<quint8>(data.constData());
 #else
-        *command = qFromBigEndian<quint8>(reinterpret_cast<const uchar *>(data.constData()));
+    *command = qFromBigEndian<quint8>(reinterpret_cast<const uchar *>(data.constData()));
 #endif
-        if (*command != MAKE_CHANNEL_REQUEST && *command != CHANNEL_MADE_REQUEST
-            && *command != DESTROY_CHANNEL_REQUEST) {
+    const bool requiresChannelNumber = *command == MAKE_CHANNEL_REQUEST
+            || *command == CHANNEL_MADE_REQUEST || *command == DESTROY_CHANNEL_REQUEST;
+    const bool isShortCommand = *command == GO_THROUGH_REQUEST || *command == SLOW_DOWN_REQUEST
+            || *command == KEEPALIVE_REQUEST;
+    if (hasChannelNumber) {
+        if (isShortCommand) {
             return false;
         }
 #if QT_VERSION >= QT_VERSION_CHECK(5, 7, 0)
@@ -93,19 +106,11 @@ static bool unpackCommand(QByteArray data, quint8 *command, quint32 *channelNumb
         *channelNumber = qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(data.constData()) + sizeof(quint8));
 #endif
         return true;
-    } else if (data.size() == sizeof(quint8)) {
-#if QT_VERSION >= QT_VERSION_CHECK(5, 7, 0)
-        *command = qFromBigEndian<quint8>(data.constData());
-#else
-        *command = qFromBigEndian<quint8>(reinterpret_cast<const uchar *>(data.constData()));
-#endif
-        if (*command != GO_THROUGH_REQUEST && *command != SLOW_DOWN_REQUEST && *command != KEEPALIVE_REQUEST) {
-            return false;
-        }
-        return true;
-    } else {
+    }
+    if (requiresChannelNumber) {
         return false;
     }
+    return true;
 }
 
 enum class BlockFlag
@@ -323,6 +328,20 @@ void DataChannelPrivate::abort(DataChannel::ChannelError reason)
         }
     }
     subChannels.clear();
+
+    // Drain real channels left in the pending queue (created by the peer but never
+    // claimed by takeChannel(), or orphaned when the connection died). Detach them
+    // from the parent first, then abort so their receiving/sending queues are
+    // released with them. The null sentinels pushed above stay put so blocked
+    // takeChannel() waiters can consume them and exit instead of hanging forever.
+    for (int i = pendingChannels.size() - 1; i >= 0; --i) {
+        QSharedPointer<VirtualChannel> pending = pendingChannels.at(i);
+        if (!pending.isNull()) {
+            pending->d_func()->parentChannel.clear();
+            pending->d_func()->abort(this->error);
+            pendingChannels.removeAt(i);
+        }
+    }
 }
 
 DataChannel::ChannelError DataChannelPrivate::handleIncomingPacket(quint32 channelNumber, const QByteArray &payload)
@@ -569,10 +588,14 @@ bool DataChannelPrivate::handleCommand(const QByteArray &packet)
         qtng_debug << "destroy channel request:" << channelNumber;
 #endif
         QSharedPointer<VirtualChannel> strong = peekChannel(channelNumber); // not remove channel from pending channels.
-        if (strong.isNull() && subChannels.contains(channelNumber)) {
+        if (subChannels.contains(channelNumber)) {
             QWeakPointer<VirtualChannel> channel = subChannels.value(channelNumber);
+            // Unregister from subChannels so trailing data packets are dropped instead
+            // of being fed into an already-aborted channel's receiving queue. A channel
+            // still in the pending queue is kept there so a blocked takeChannel() can
+            // observe the termination.
             cleanChannel(channelNumber, false);
-            if (!channel.isNull()) {
+            if (strong.isNull()) {
                 strong = channel.toStrongRef();
             }
         }
