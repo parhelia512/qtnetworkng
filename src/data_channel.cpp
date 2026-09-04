@@ -77,12 +77,15 @@ static QByteArray packKeepaliveRequest()
 
 static bool unpackCommand(QByteArray data, quint8 *command, quint32 *channelNumber)
 {
-    // 只在这里校验帧布局；命令是否*已知*由 handleCommand() 决定，这样未来对端
-    // 扩展协议时不会拖垮旧的一端：
-    //   - command < 32：关键命令必须被理解，未知的视为版本不匹配而中止连接。
-    //   - command >= 32：可选扩展，未知的静默忽略。
-    // 已知命令仍必须以自己的固定布局到达（命令 1..3 带 32 位通道号，4..6 不带）；
-    // 布局不匹配意味着帧畸形而非仅仅未知。
+    // Parses a command frame: only the wire layout is validated here. Whether a
+    // command is *known* is decided by handleCommand(), so a future peer can extend
+    // the protocol without taking down an older one:
+    //   - command < 32:  critical commands must be understood; an unknown one is a
+    //                    version mismatch and still aborts the connection.
+    //   - command >= 32: optional extensions; unknown ones are silently ignored.
+    // A known command must still arrive in its own fixed layout (commands 1..3
+    // carry a 32-bit channel number, commands 4..6 do not); a mismatch means the
+    // frame is malformed rather than merely unknown.
     const bool hasChannelNumber = data.size() == (sizeof(quint8) + sizeof(quint32));
     if (!hasChannelNumber && data.size() != sizeof(quint8)) {
         return false;
