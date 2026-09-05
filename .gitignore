@@ -8,3 +8,4 @@ website/
 
 /docs/_build
 /examples/coroutines/coroutines.pro.user
+/examples/*/build/
